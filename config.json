@@ -1,0 +1,6 @@
+{
+    "tcp_host": "172.20.10.2",
+    "tcp_port": 8080,
+    "speed": 50,
+    "threshold": 30
+}
