@@ -45,6 +45,7 @@ typedef struct {
     int blue_count;
     int other_count;
     int total_count;
+    int detection_count;
     char last_color[20];
     int conveyor_speed;
     int system_status;
@@ -52,6 +53,7 @@ typedef struct {
     uint32_t last_stm32_time;
     int stm32_connected;
     int gui_connected;
+    uint32_t last_detection_time;
 } conveyor_data_t;
 
 static conveyor_data_t conveyor_data = {
@@ -60,13 +62,15 @@ static conveyor_data_t conveyor_data = {
     .blue_count = 0,
     .other_count = 0,
     .total_count = 0,
+    .detection_count = 0,
     .last_color = "NINGUNO",
     .conveyor_speed = 75,
     .system_status = 0,
     .timestamp = 0,
     .last_stm32_time = 0,
     .stm32_connected = 0,
-    .gui_connected = 0
+    .gui_connected = 0,
+    .last_detection_time = 0
 };
 
 /* =========================================================
@@ -86,7 +90,7 @@ static void process_stm32_data(const char* data);
 static void send_to_stm32(const char* command);
 
 /* =========================================================
- * WIFI (LOGS REDUCIDOS)
+ * WIFI
  * ========================================================= */
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
@@ -166,18 +170,17 @@ static void uart_init(void)
 }
 
 /* =========================================================
- * ENVIAR COMANDO A STM32 (SIN LOG)
+ * ENVIAR COMANDO A STM32
  * ========================================================= */
 static void send_to_stm32(const char* command)
 {
     char buffer[128];
     snprintf(buffer, sizeof(buffer), "%s\n", command);
     uart_write_bytes(UART_PORT_NUM, buffer, strlen(buffer));
-    // SIN LOG PARA REDUCIR SPAM
 }
 
 /* =========================================================
- * PROCESAR DATOS DEL STM32 (LOGS REDUCIDOS)
+ * PROCESAR DATOS DEL STM32 - CORREGIDO
  * ========================================================= */
 static void process_stm32_data(const char* data)
 {
@@ -201,31 +204,93 @@ static void process_stm32_data(const char* data)
     conveyor_data.last_stm32_time = esp_log_timestamp();
     conveyor_data.stm32_connected = 1;
     
-    if (strncmp(buffer, "COLOR:", 6) == 0) {
-        char* color = buffer + 6;
-        strncpy(conveyor_data.last_color, color, sizeof(conveyor_data.last_color)-1);
-        conveyor_data.last_color[sizeof(conveyor_data.last_color)-1] = '\0';
+    int color_detected = 0;
+    char detected_color[20] = {0};
+    int old_total_count = conveyor_data.total_count; // Guardar valor anterior
+    
+    // =========================================================
+    // 1. MANEJAR "DETECTADO"
+    // =========================================================
+    if (strstr(buffer, "DETECTADO") != NULL) {
+        // Incrementar contador de detecciones
+        conveyor_data.detection_count++;
+        conveyor_data.last_detection_time = esp_log_timestamp();
         
-        if (strcmp(color, "ROJO") == 0) {
-            conveyor_data.red_count++;
-        } else if (strcmp(color, "VERDE") == 0) {
-            conveyor_data.green_count++;
-        } else if (strcmp(color, "AZUL") == 0) {
-            conveyor_data.blue_count++;
-        } else {
-            conveyor_data.other_count++;
-        }
+        ESP_LOGI(TAG, "Detección recibida (Total: %d)", conveyor_data.detection_count);
         
-        conveyor_data.total_count++;
-        conveyor_data.timestamp = esp_log_timestamp();
-        
-        // LOG SOLO RESUMIDO
-        static int color_log_counter = 0;
-        color_log_counter++;
-        if (color_log_counter % 5 == 0) {  // Solo cada 5 detecciones
-            ESP_LOGI(TAG, "Color: %s (Total: %d)", color, conveyor_data.total_count);
+        // Enviar a GUI inmediatamente
+        if (tcp_client_sock > 0) {
+            send(tcp_client_sock, "DETECTADO\n", 10, 0);
+            ESP_LOGI(TAG, "-> GUI: DETECTADO");
         }
     }
+    // =========================================================
+    // 2. MANEJAR "COLOR:"
+    // =========================================================
+    else if (strncmp(buffer, "COLOR:", 6) == 0) {
+        char* color_ptr = buffer + 6;
+        
+        // Limpiar posibles espacios extras
+        while (*color_ptr == ' ') color_ptr++;
+        
+        // Copiar color a buffer seguro
+        strncpy(detected_color, color_ptr, sizeof(detected_color)-1);
+        detected_color[sizeof(detected_color)-1] = '\0';
+        
+        // Copiar a estructura
+        strncpy(conveyor_data.last_color, detected_color, sizeof(conveyor_data.last_color)-1);
+        conveyor_data.last_color[sizeof(conveyor_data.last_color)-1] = '\0';
+        
+        // Verificar si hubo detección reciente (dentro de 2 segundos)
+        uint32_t current_time = esp_log_timestamp();
+        uint32_t time_since_detection = current_time - conveyor_data.last_detection_time;
+        
+        if (time_since_detection <= 2000) {  // 2 segundos
+            // Contar el color solo si hubo detección reciente
+            if (strcmp(detected_color, "ROJO") == 0) {
+                conveyor_data.red_count++;
+                color_detected = 1;
+            } else if (strcmp(detected_color, "VERDE") == 0) {
+                conveyor_data.green_count++;
+                color_detected = 1;
+            } else if (strcmp(detected_color, "AZUL") == 0) {
+                conveyor_data.blue_count++;
+                color_detected = 1;
+            } else {
+                conveyor_data.other_count++;
+                color_detected = 1;
+            }
+            
+            if (color_detected) {
+                conveyor_data.total_count++;
+                ESP_LOGI(TAG, "Color %s CONTADO (Total: %d)", detected_color, conveyor_data.total_count);
+            }
+        } else {
+            ESP_LOGW(TAG, "Color %s IGNORADO - Sin detección reciente", detected_color);
+        }
+        
+        conveyor_data.timestamp = current_time;
+        
+        // Enviar mensaje de color a GUI
+        if (tcp_client_sock > 0) {
+            char color_msg[64];
+            int len = snprintf(color_msg, sizeof(color_msg), "Color: %s\n", detected_color);
+            if (len > 0 && len < sizeof(color_msg)) {
+                send(tcp_client_sock, color_msg, len, 0);
+                ESP_LOGI(TAG, "-> GUI: %s", color_msg);
+            }
+        }
+        
+        // Log cada 5 colores
+        static int color_log_counter = 0;
+        color_log_counter++;
+        if (color_log_counter % 5 == 0) {
+            ESP_LOGI(TAG, "Color: %s (Total: %d)", detected_color, conveyor_data.total_count);
+        }
+    }
+    // =========================================================
+    // 3. MANEJAR OTROS COMANDOS
+    // =========================================================
     else if (strncmp(buffer, "SPEED:", 6) == 0) {
         int new_speed = atoi(buffer + 6);
         if (new_speed != conveyor_data.conveyor_speed) {
@@ -256,6 +321,7 @@ static void process_stm32_data(const char* data)
         conveyor_data.blue_count = 0;
         conveyor_data.other_count = 0;
         conveyor_data.total_count = 0;
+        conveyor_data.detection_count = 0;
         strcpy(conveyor_data.last_color, "NINGUNO");
         ESP_LOGI(TAG, "Contadores RESET");
     }
@@ -266,9 +332,10 @@ static void process_stm32_data(const char* data)
         // STM32 solicita estado del ESP32
         char response[128];
         snprintf(response, sizeof(response),
-                "ESP32_STATUS|R:%d|V:%d|A:%d|T:%d|S:%d|V:%d\n",
+                "ESP32_STATUS|R:%d|V:%d|A:%d|T:%d|D:%d|S:%d|V:%d\n",
                 conveyor_data.red_count, conveyor_data.green_count,
                 conveyor_data.blue_count, conveyor_data.total_count,
+                conveyor_data.detection_count,
                 conveyor_data.system_status, conveyor_data.conveyor_speed);
         
         send_to_stm32(response);
@@ -277,7 +344,7 @@ static void process_stm32_data(const char* data)
         ESP_LOGI(TAG, "STM32 conectado");
         send_to_stm32("ESP32_READY");
     }
-    else if (strlen(buffer) > 2) {  // Solo log si tiene más de 2 caracteres
+    else if (strlen(buffer) > 2) {
         // Verificar si es texto legible
         int is_printable = 1;
         for (int i = 0; buffer[i]; i++) {
@@ -291,30 +358,40 @@ static void process_stm32_data(const char* data)
         }
     }
     
+    // Verificar si hubo cambio en el conteo
+    int count_changed = (old_total_count != conveyor_data.total_count);
+    
     xSemaphoreGive(data_mutex);
     
-    // Enviar datos a GUI si está conectada
-    if (tcp_client_sock > 0) {
+    // =========================================================
+    // ENVIAR JSON ACTUALIZADO A GUI SI SE DETECTÓ UN COLOR
+    // =========================================================
+    if (tcp_client_sock > 0 && (color_detected || count_changed)) {
         char json_buffer[512];
         xSemaphoreTake(data_mutex, portMAX_DELAY);
         
         snprintf(json_buffer, sizeof(json_buffer),
                 "{\"type\":\"update\",\"red\":%d,\"green\":%d,\"blue\":%d,"
-                "\"other\":%d,\"total\":%d,\"last_color\":\"%s\","
+                "\"other\":%d,\"total\":%d,\"detections\":%d,\"last_color\":\"%s\","
                 "\"speed\":%d,\"status\":%d}\n",
                 conveyor_data.red_count, conveyor_data.green_count,
                 conveyor_data.blue_count, conveyor_data.other_count,
-                conveyor_data.total_count, conveyor_data.last_color,
+                conveyor_data.total_count, conveyor_data.detection_count,
+                conveyor_data.last_color,
                 conveyor_data.conveyor_speed, conveyor_data.system_status);
         
         xSemaphoreGive(data_mutex);
         
         send(tcp_client_sock, json_buffer, strlen(json_buffer), 0);
+        ESP_LOGI(TAG, "-> GUI: JSON enviado (ROJO:%d, VERDE:%d, AZUL:%d, OTRO:%d, TOTAL:%d)", 
+                conveyor_data.red_count, conveyor_data.green_count,
+                conveyor_data.blue_count, conveyor_data.other_count,
+                conveyor_data.total_count);
     }
 }
 
 /* =========================================================
- * TAREA DE LECTURA UART (CON DELAYS MÁS LARGOS)
+ * TAREA DE LECTURA UART
  * ========================================================= */
 static void uart_read_task(void *pvParameters)
 {
@@ -330,7 +407,7 @@ static void uart_read_task(void *pvParameters)
     int line_index = 0;
     
     while (1) {
-        // Leer con timeout más largo
+        // Leer con timeout
         int data_len = uart_read_bytes(UART_PORT_NUM, data, sizeof(data) - 1, pdMS_TO_TICKS(100));
         
         if (data_len > 0) {
@@ -356,15 +433,15 @@ static void uart_read_task(void *pvParameters)
             }
         }
         
-        // Verificar conexión STM32 (MUCHO MÁS LENTO - cada 30 segundos)
+        // Verificar conexión STM32
         static uint32_t last_check = 0;
         uint32_t now = xTaskGetTickCount();
         
-        if (now - last_check > 30000 / portTICK_PERIOD_MS) {  // Cada 30 segundos
+        if (now - last_check > 30000 / portTICK_PERIOD_MS) {
             xSemaphoreTake(data_mutex, portMAX_DELAY);
             
             uint32_t current_time = esp_log_timestamp();
-            if (current_time - conveyor_data.last_stm32_time > 30000) {  // 30 seg sin comunicación
+            if (current_time - conveyor_data.last_stm32_time > 30000) {
                 if (conveyor_data.stm32_connected) {
                     conveyor_data.stm32_connected = 0;
                     ESP_LOGW(TAG, "STM32 desconectado");
@@ -380,13 +457,12 @@ static void uart_read_task(void *pvParameters)
             last_check = now;
         }
         
-        // Delay más largo para reducir CPU usage
         vTaskDelay(50 / portTICK_PERIOD_MS);
     }
 }
 
 /* =========================================================
- * MANEJO DE CLIENTE GUI (LOGS REDUCIDOS)
+ * MANEJO DE CLIENTE GUI
  * ========================================================= */
 static void handle_gui_client(int client_sock)
 {
@@ -405,13 +481,13 @@ static void handle_gui_client(int client_sock)
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     
-    // Mensaje de bienvenida corto
+    // Mensaje de bienvenida
     char init_msg[256];
     xSemaphoreTake(data_mutex, portMAX_DELAY);
     snprintf(init_msg, sizeof(init_msg),
-            "{\"type\":\"init\",\"stm32\":%d,\"speed\":%d,\"status\":%d}\n",
+            "{\"type\":\"init\",\"stm32\":%d,\"speed\":%d,\"status\":%d,\"detections\":%d}\n",
             conveyor_data.stm32_connected, conveyor_data.conveyor_speed, 
-            conveyor_data.system_status);
+            conveyor_data.system_status, conveyor_data.detection_count);
     xSemaphoreGive(data_mutex);
     
     send(client_sock, init_msg, strlen(init_msg), 0);
@@ -430,7 +506,7 @@ static void handle_gui_client(int client_sock)
             p++;
         }
         
-        // Solo log comandos importantes
+        // Log comandos importantes
         if (strcmp(buffer, "START") == 0 || strcmp(buffer, "STOP") == 0 || 
             strncmp(buffer, "SET_SPEED:", 10) == 0) {
             ESP_LOGI(TAG, "GUI: %s", buffer);
@@ -441,10 +517,12 @@ static void handle_gui_client(int client_sock)
             xSemaphoreTake(data_mutex, portMAX_DELAY);
             snprintf(json, sizeof(json),
                     "{\"type\":\"data\",\"red\":%d,\"green\":%d,\"blue\":%d,"
-                    "\"total\":%d,\"color\":\"%s\",\"speed\":%d}\n",
+                    "\"other\":%d,\"total\":%d,\"detections\":%d,\"color\":\"%s\",\"speed\":%d}\n",
                     conveyor_data.red_count, conveyor_data.green_count,
-                    conveyor_data.blue_count, conveyor_data.total_count,
-                    conveyor_data.last_color, conveyor_data.conveyor_speed);
+                    conveyor_data.blue_count, conveyor_data.other_count,
+                    conveyor_data.total_count, conveyor_data.detection_count,
+                    conveyor_data.last_color, 
+                    conveyor_data.conveyor_speed);
             xSemaphoreGive(data_mutex);
             send(client_sock, json, strlen(json), 0);
         }
@@ -471,8 +549,12 @@ static void handle_gui_client(int client_sock)
         else if (strcmp(buffer, "RESET_COUNTERS") == 0) {
             send_to_stm32("RESET");
             xSemaphoreTake(data_mutex, portMAX_DELAY);
-            conveyor_data.red_count = conveyor_data.green_count = conveyor_data.blue_count = 0;
+            conveyor_data.red_count = 0;
+            conveyor_data.green_count = 0;
+            conveyor_data.blue_count = 0;
+            conveyor_data.other_count = 0;
             conveyor_data.total_count = 0;
+            conveyor_data.detection_count = 0;
             strcpy(conveyor_data.last_color, "NINGUNO");
             xSemaphoreGive(data_mutex);
             send(client_sock, "{\"type\":\"ok\",\"cmd\":\"reset\"}\n", 30, 0);
@@ -481,8 +563,9 @@ static void handle_gui_client(int client_sock)
             char status_msg[128];
             xSemaphoreTake(data_mutex, portMAX_DELAY);
             snprintf(status_msg, sizeof(status_msg),
-                    "{\"type\":\"status\",\"speed\":%d,\"stm32\":%d}\n",
-                    conveyor_data.conveyor_speed, conveyor_data.stm32_connected);
+                    "{\"type\":\"status\",\"speed\":%d,\"stm32\":%d,\"detections\":%d}\n",
+                    conveyor_data.conveyor_speed, conveyor_data.stm32_connected,
+                    conveyor_data.detection_count);
             xSemaphoreGive(data_mutex);
             send(client_sock, status_msg, strlen(status_msg), 0);
         }
@@ -502,7 +585,7 @@ static void handle_gui_client(int client_sock)
 }
 
 /* =========================================================
- * TAREA SERVIDOR TCP (SIN LOGS EXCESIVOS)
+ * TAREA SERVIDOR TCP
  * ========================================================= */
 static void tcp_server_task(void *pvParameters)
 {
@@ -547,7 +630,7 @@ static void tcp_server_task(void *pvParameters)
         int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &client_len);
 
         if (client_sock < 0) {
-            continue;  // Sin log de error
+            continue;
         }
 
         if (tcp_client_sock > 0) {
@@ -563,18 +646,19 @@ static void tcp_server_task(void *pvParameters)
 }
 
 /* =========================================================
- * FUNCION PRINCIPAL (CON LOG LEVEL BAJO)
+ * FUNCION PRINCIPAL
  * ========================================================= */
 void app_main(void)
 {
-    // 1. CONFIGURAR NIVEL DE LOGS BAJO
-    esp_log_level_set("*", ESP_LOG_WARN);      // Solo warnings y errores
-    esp_log_level_set("wifi", ESP_LOG_WARN);   // WiFi en modo silencioso
-    esp_log_level_set("ESP32", ESP_LOG_INFO);  // Nuestro tag muestra info
+    // Configurar logs
+    esp_log_level_set("*", ESP_LOG_WARN);
+    esp_log_level_set("wifi", ESP_LOG_WARN);
+    esp_log_level_set("ESP32", ESP_LOG_INFO);
     
     printf("\n\n");
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Sistema Cinta Transportadora");
+    ESP_LOGI(TAG, "Con detección por sensor");
     ESP_LOGI(TAG, "Web: puerto %d", PORT);
     ESP_LOGI(TAG, "========================================");
     
@@ -602,17 +686,18 @@ void app_main(void)
     
     ESP_LOGI(TAG, "Sistema listo");
     
-    // Loop principal MUY LENTO (cada 60 segundos)
+    // Loop principal
     int counter = 0;
     while (1) {
-        vTaskDelay(2000 / portTICK_PERIOD_MS);  // Solo cada 60 segundos
+        vTaskDelay(60000 / portTICK_PERIOD_MS);
         
         // Mostrar estado resumido
         xSemaphoreTake(data_mutex, portMAX_DELAY);
-        ESP_LOGI(TAG, "Estado [%d]: STM32=%s, GUI=%s, Cajas=%d", 
+        ESP_LOGI(TAG, "Estado [%d]: STM32=%s, GUI=%s, Detecciones=%d, Cajas=%d", 
                 counter++,
                 conveyor_data.stm32_connected ? "OK" : "NO",
                 conveyor_data.gui_connected ? "OK" : "NO",
+                conveyor_data.detection_count,
                 conveyor_data.total_count);
         xSemaphoreGive(data_mutex);
     }

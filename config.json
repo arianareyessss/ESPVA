@@ -1,6 +1,6 @@
 {
-    "tcp_host": "172.20.10.2",
+    "tcp_host": "192.168.1.100",
     "tcp_port": 8080,
-    "speed": 50,
-    "threshold": 30
+    "auto_update": true,
+    "update_interval": "1000"
 }
