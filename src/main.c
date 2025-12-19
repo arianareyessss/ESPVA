@@ -605,7 +605,7 @@ void app_main(void)
     // Loop principal MUY LENTO (cada 60 segundos)
     int counter = 0;
     while (1) {
-        vTaskDelay(15000 / portTICK_PERIOD_MS);  // Solo cada 60 segundos
+        vTaskDelay(2000 / portTICK_PERIOD_MS);  // Solo cada 60 segundos
         
         // Mostrar estado resumido
         xSemaphoreTake(data_mutex, portMAX_DELAY);
