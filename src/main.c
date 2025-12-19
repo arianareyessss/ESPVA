@@ -2,7 +2,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include "driver/uart.h"
-#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -33,11 +32,11 @@
 #define UART_BAUD_RATE  115200
 #define UART_RX_PIN     16
 #define UART_TX_PIN     17
-#define UART_BUF_SIZE   1024
+#define UART_BUF_SIZE   2048
 
-static const char *TAG = "ESP32_FAKE";
+static const char *TAG = "ESP32";
 
-/* =========================3-3================================
+/* =========================================================
  * ESTRUCTURAS DE DATOS
  * ========================================================= */
 typedef struct {
@@ -50,7 +49,9 @@ typedef struct {
     int conveyor_speed;
     int system_status;
     uint32_t timestamp;
-    int fake_active;
+    uint32_t last_stm32_time;
+    int stm32_connected;
+    int gui_connected;
 } conveyor_data_t;
 
 static conveyor_data_t conveyor_data = {
@@ -63,7 +64,9 @@ static conveyor_data_t conveyor_data = {
     .conveyor_speed = 75,
     .system_status = 0,
     .timestamp = 0,
-    .fake_active = 0
+    .last_stm32_time = 0,
+    .stm32_connected = 0,
+    .gui_connected = 0
 };
 
 /* =========================================================
@@ -75,19 +78,15 @@ static EventGroupHandle_t wifi_event_group;
 static QueueHandle_t uart_queue;
 static int tcp_client_sock = -1;
 static SemaphoreHandle_t data_mutex;
-static esp_timer_handle_t fake_data_timer;
 
 /* =========================================================
- * DECLARACIONES DE FUNCIONES (para resolver orden)
+ * DECLARACIONES DE FUNCIONES
  * ========================================================= */
 static void process_stm32_data(const char* data);
-static void generate_fake_detection(void);
-static void fake_data_timer_callback(void* arg);
-static void start_fake_data_timer(void);
-static void stop_fake_data_timer(void);
+static void send_to_stm32(const char* command);
 
 /* =========================================================
- * WIFI
+ * WIFI (LOGS REDUCIDOS)
  * ========================================================= */
 static void wifi_event_handler(void *arg,
                                esp_event_base_t event_base,
@@ -96,7 +95,7 @@ static void wifi_event_handler(void *arg,
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
-        ESP_LOGI(TAG, "Conectando a WiFi...");
+        ESP_LOGI(TAG, "Conectando WiFi...");
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
@@ -106,12 +105,7 @@ static void wifi_event_handler(void *arg,
         snprintf(esp_ip, sizeof(esp_ip), "%u.%u.%u.%u",
                  ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
         
-        ESP_LOGI(TAG, "================================================");
-        ESP_LOGI(TAG, "WIFI CONECTADO");
-        ESP_LOGI(TAG, "IP del ESP32: %s", esp_ip);
-        ESP_LOGI(TAG, "Puerto: %d", PORT);
-        ESP_LOGI(TAG, "================================================");
-        ESP_LOGI(TAG, "Conecta GUI a: %s:%d", esp_ip, PORT);
+        ESP_LOGI(TAG, "WiFi CONECTADO - IP: %s:%d", esp_ip, PORT);
         
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
@@ -145,7 +139,7 @@ static void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi inicializado. SSID: %s", WIFI_SSID);
+    ESP_LOGI(TAG, "WiFi: %s", WIFI_SSID);
 }
 
 /* =========================================================
@@ -168,26 +162,44 @@ static void uart_init(void)
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, UART_BUF_SIZE, UART_BUF_SIZE,
                                         10, &uart_queue, 0));
     
-    ESP_LOGI(TAG, "UART listo: Baud %d", UART_BAUD_RATE);
+    ESP_LOGI(TAG, "UART: %d bauds", UART_BAUD_RATE);
 }
 
 /* =========================================================
- * PROCESAR DATOS
+ * ENVIAR COMANDO A STM32 (SIN LOG)
+ * ========================================================= */
+static void send_to_stm32(const char* command)
+{
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "%s\n", command);
+    uart_write_bytes(UART_PORT_NUM, buffer, strlen(buffer));
+    // SIN LOG PARA REDUCIR SPAM
+}
+
+/* =========================================================
+ * PROCESAR DATOS DEL STM32 (LOGS REDUCIDOS)
  * ========================================================= */
 static void process_stm32_data(const char* data)
 {
-    ESP_LOGI(TAG, "Dato: %s", data);
-    
     char buffer[256];
     strncpy(buffer, data, sizeof(buffer)-1);
     buffer[sizeof(buffer)-1] = '\0';
     
-    char *newline = strchr(buffer, '\r');
-    if (newline) *newline = '\0';
-    newline = strchr(buffer, '\n');
-    if (newline) *newline = '\0';
+    // Limpiar caracteres de control
+    char *p = buffer;
+    while (*p) {
+        if (*p == '\r' || *p == '\n') *p = '\0';
+        p++;
+    }
+    
+    // Ignorar si está vacío
+    if (strlen(buffer) == 0) return;
     
     xSemaphoreTake(data_mutex, portMAX_DELAY);
+    
+    // Actualizar tiempo de última comunicación STM32
+    conveyor_data.last_stm32_time = esp_log_timestamp();
+    conveyor_data.stm32_connected = 1;
     
     if (strncmp(buffer, "COLOR:", 6) == 0) {
         char* color = buffer + 6;
@@ -207,50 +219,93 @@ static void process_stm32_data(const char* data)
         conveyor_data.total_count++;
         conveyor_data.timestamp = esp_log_timestamp();
         
-        ESP_LOGI(TAG, "Caja: %s | ROJO:%d VERDE:%d AZUL:%d TOTAL:%d", 
-                color, conveyor_data.red_count, conveyor_data.green_count,
-                conveyor_data.blue_count, conveyor_data.total_count);
+        // LOG SOLO RESUMIDO
+        static int color_log_counter = 0;
+        color_log_counter++;
+        if (color_log_counter % 5 == 0) {  // Solo cada 5 detecciones
+            ESP_LOGI(TAG, "Color: %s (Total: %d)", color, conveyor_data.total_count);
+        }
     }
     else if (strncmp(buffer, "SPEED:", 6) == 0) {
-        conveyor_data.conveyor_speed = atoi(buffer + 6);
-        if (conveyor_data.conveyor_speed < 0) conveyor_data.conveyor_speed = 0;
-        if (conveyor_data.conveyor_speed > 100) conveyor_data.conveyor_speed = 100;
-        ESP_LOGI(TAG, "Velocidad: %d%%", conveyor_data.conveyor_speed);
+        int new_speed = atoi(buffer + 6);
+        if (new_speed != conveyor_data.conveyor_speed) {
+            conveyor_data.conveyor_speed = new_speed;
+            if (conveyor_data.conveyor_speed < 0) conveyor_data.conveyor_speed = 0;
+            if (conveyor_data.conveyor_speed > 100) conveyor_data.conveyor_speed = 100;
+            ESP_LOGI(TAG, "Velocidad: %d%%", conveyor_data.conveyor_speed);
+        }
     }
     else if (strncmp(buffer, "STATUS:", 7) == 0) {
         char* status = buffer + 7;
-        if (strcmp(status, "RUNNING") == 0) {
+        int old_status = conveyor_data.system_status;
+        
+        if (strcmp(status, "RUNNING") == 0 || strcmp(status, "START") == 0) {
             conveyor_data.system_status = 1;
-            conveyor_data.fake_active = 1;
-            ESP_LOGI(TAG, "Sistema INICIADO - Datos fake ACTIVADOS");
-        } else if (strcmp(status, "STOPPED") == 0) {
+            if (old_status != 1) ESP_LOGI(TAG, "Sistema INICIADO");
+        } else if (strcmp(status, "STOPPED") == 0 || strcmp(status, "STOP") == 0) {
             conveyor_data.system_status = 0;
-            conveyor_data.fake_active = 0;
-            ESP_LOGI(TAG, "Sistema DETENIDO - Datos fake DESACTIVADOS");
+            if (old_status != 0) ESP_LOGI(TAG, "Sistema DETENIDO");
         } else if (strcmp(status, "ERROR") == 0) {
             conveyor_data.system_status = 2;
-            ESP_LOGE(TAG, "Estado ERROR");
+            ESP_LOGE(TAG, "ERROR del sistema");
         }
+    }
+    else if (strncmp(buffer, "RESET", 5) == 0) {
+        conveyor_data.red_count = 0;
+        conveyor_data.green_count = 0;
+        conveyor_data.blue_count = 0;
+        conveyor_data.other_count = 0;
+        conveyor_data.total_count = 0;
+        strcpy(conveyor_data.last_color, "NINGUNO");
+        ESP_LOGI(TAG, "Contadores RESET");
     }
     else if (strncmp(buffer, "ERROR:", 6) == 0) {
         ESP_LOGE(TAG, "Error: %s", buffer + 6);
     }
+    else if (strncmp(buffer, "GET_STATUS", 10) == 0) {
+        // STM32 solicita estado del ESP32
+        char response[128];
+        snprintf(response, sizeof(response),
+                "ESP32_STATUS|R:%d|V:%d|A:%d|T:%d|S:%d|V:%d\n",
+                conveyor_data.red_count, conveyor_data.green_count,
+                conveyor_data.blue_count, conveyor_data.total_count,
+                conveyor_data.system_status, conveyor_data.conveyor_speed);
+        
+        send_to_stm32(response);
+    }
+    else if (strncmp(buffer, "HELLO", 5) == 0 || strncmp(buffer, "STM32_READY", 11) == 0) {
+        ESP_LOGI(TAG, "STM32 conectado");
+        send_to_stm32("ESP32_READY");
+    }
+    else if (strlen(buffer) > 2) {  // Solo log si tiene más de 2 caracteres
+        // Verificar si es texto legible
+        int is_printable = 1;
+        for (int i = 0; buffer[i]; i++) {
+            if (buffer[i] < 32 && buffer[i] != '\t') {
+                is_printable = 0;
+                break;
+            }
+        }
+        if (is_printable) {
+            ESP_LOGI(TAG, "STM32: %s", buffer);
+        }
+    }
     
     xSemaphoreGive(data_mutex);
     
+    // Enviar datos a GUI si está conectada
     if (tcp_client_sock > 0) {
         char json_buffer[512];
         xSemaphoreTake(data_mutex, portMAX_DELAY);
         
         snprintf(json_buffer, sizeof(json_buffer),
-                "{\"type\":\"sensor_data\",\"red\":%d,\"green\":%d,\"blue\":%d,\"other\":%d,"
-                "\"total\":%d,\"last_color\":\"%s\",\"speed\":%d,\"status\":%d,\"fake\":%d,\"timestamp\":%lu}\n",
+                "{\"type\":\"update\",\"red\":%d,\"green\":%d,\"blue\":%d,"
+                "\"other\":%d,\"total\":%d,\"last_color\":\"%s\","
+                "\"speed\":%d,\"status\":%d}\n",
                 conveyor_data.red_count, conveyor_data.green_count,
                 conveyor_data.blue_count, conveyor_data.other_count,
                 conveyor_data.total_count, conveyor_data.last_color,
-                conveyor_data.conveyor_speed, conveyor_data.system_status,
-                conveyor_data.fake_active,
-                (unsigned long)conveyor_data.timestamp);
+                conveyor_data.conveyor_speed, conveyor_data.system_status);
         
         xSemaphoreGive(data_mutex);
         
@@ -259,97 +314,79 @@ static void process_stm32_data(const char* data)
 }
 
 /* =========================================================
- * GENERAR DATOS FAKE
- * ========================================================= */
-static void generate_fake_detection(void)
-{
-    if (conveyor_data.fake_active && conveyor_data.system_status == 1) {
-        static int fake_counter = 0;
-        fake_counter++;
-        
-        const char* colors[] = {"ROJO", "VERDE", "AZUL", "OTRO"};
-        const char* color = colors[fake_counter % 4];
-        
-        char fake_message[64];
-        snprintf(fake_message, sizeof(fake_message), "COLOR:%s\n", color);
-        
-        ESP_LOGI(TAG, "Dato FAKE: %s", fake_message);
-        
-        process_stm32_data(fake_message);
-        
-        if (fake_counter % 5 == 0) {
-            int new_speed = 60 + (fake_counter % 40);
-            snprintf(fake_message, sizeof(fake_message), "SPEED:%d\n", new_speed);
-            process_stm32_data(fake_message);
-        }
-    }
-}
-
-/* =========================================================
- * TIMER PARA DATOS FAKE
- * ========================================================= */
-static void fake_data_timer_callback(void* arg)
-{
-    generate_fake_detection();
-}
-
-static void start_fake_data_timer(void)
-{
-    esp_timer_create_args_t timer_args = {
-        .callback = &fake_data_timer_callback,
-        .arg = NULL,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "fake_timer"
-    };
-    
-    esp_timer_create(&timer_args, &fake_data_timer);
-    esp_timer_start_periodic(fake_data_timer, 2000000);
-}
-
-static void stop_fake_data_timer(void)
-{
-    if (fake_data_timer) {
-        esp_timer_stop(fake_data_timer);
-        esp_timer_delete(fake_data_timer);
-        fake_data_timer = NULL;
-    }
-}
-
-/* =========================================================
- * TAREA UART
+ * TAREA DE LECTURA UART (CON DELAYS MÁS LARGOS)
  * ========================================================= */
 static void uart_read_task(void *pvParameters)
 {
-    ESP_LOGI(TAG, "Tarea UART iniciada");
+    ESP_LOGI(TAG, "Iniciando comunicación UART...");
     
+    // Esperar y enviar ready
     vTaskDelay(2000 / portTICK_PERIOD_MS);
-    process_stm32_data("STATUS:STOPPED\n");
-    process_stm32_data("SPEED:75\n");
+    send_to_stm32("ESP32_READY");
+    ESP_LOGI(TAG, "Esperando STM32...");
     
-    uint8_t data[UART_BUF_SIZE];
-    int data_len;
+    uint8_t data[128];
+    char line_buffer[64];
+    int line_index = 0;
     
     while (1) {
-        data_len = uart_read_bytes(UART_PORT_NUM, data, sizeof(data) - 1, pdMS_TO_TICKS(100));
+        // Leer con timeout más largo
+        int data_len = uart_read_bytes(UART_PORT_NUM, data, sizeof(data) - 1, pdMS_TO_TICKS(100));
         
         if (data_len > 0) {
             data[data_len] = '\0';
             
-            char *line = strtok((char*)data, "\n");
-            while (line != NULL) {
-                if (strlen(line) > 0) {
-                    process_stm32_data(line);
+            for (int i = 0; i < data_len; i++) {
+                char c = data[i];
+                
+                // Filtrar caracteres no ASCII
+                if (c == 0 || c == 0xFF || (c < 32 && c != '\t' && c != '\n' && c != '\r')) {
+                    continue;
                 }
-                line = strtok(NULL, "\n");
+                
+                if (c == '\n' || c == '\r') {
+                    if (line_index > 0) {
+                        line_buffer[line_index] = '\0';
+                        process_stm32_data(line_buffer);
+                        line_index = 0;
+                    }
+                } else if (line_index < sizeof(line_buffer) - 1) {
+                    line_buffer[line_index++] = c;
+                }
             }
         }
         
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+        // Verificar conexión STM32 (MUCHO MÁS LENTO - cada 30 segundos)
+        static uint32_t last_check = 0;
+        uint32_t now = xTaskGetTickCount();
+        
+        if (now - last_check > 30000 / portTICK_PERIOD_MS) {  // Cada 30 segundos
+            xSemaphoreTake(data_mutex, portMAX_DELAY);
+            
+            uint32_t current_time = esp_log_timestamp();
+            if (current_time - conveyor_data.last_stm32_time > 30000) {  // 30 seg sin comunicación
+                if (conveyor_data.stm32_connected) {
+                    conveyor_data.stm32_connected = 0;
+                    ESP_LOGW(TAG, "STM32 desconectado");
+                    
+                    if (tcp_client_sock > 0) {
+                        char disconnect_msg[] = "{\"type\":\"alert\",\"msg\":\"STM32 desconectado\"}\n";
+                        send(tcp_client_sock, disconnect_msg, strlen(disconnect_msg), 0);
+                    }
+                }
+            }
+            
+            xSemaphoreGive(data_mutex);
+            last_check = now;
+        }
+        
+        // Delay más largo para reducir CPU usage
+        vTaskDelay(50 / portTICK_PERIOD_MS);
     }
 }
 
 /* =========================================================
- * TAREA SERVIDOR TCP
+ * MANEJO DE CLIENTE GUI (LOGS REDUCIDOS)
  * ========================================================= */
 static void handle_gui_client(int client_sock)
 {
@@ -362,113 +399,119 @@ static void handle_gui_client(int client_sock)
     
     ESP_LOGI(TAG, "GUI conectada: %s", client_ip);
     tcp_client_sock = client_sock;
+    conveyor_data.gui_connected = 1;
     
-    struct timeval timeout = {.tv_sec = 50, .tv_usec = 0};
+    struct timeval timeout = {.tv_sec = 30, .tv_usec = 0};
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     
-    char init_msg[512];
+    // Mensaje de bienvenida corto
+    char init_msg[256];
     xSemaphoreTake(data_mutex, portMAX_DELAY);
-    
     snprintf(init_msg, sizeof(init_msg),
-            "{\"type\":\"init\",\"message\":\"ESP32 Listo\","
-            "\"red\":%d,\"green\":%d,\"blue\":%d,\"other\":%d,\"total\":%d,"
-            "\"speed\":%d,\"status\":%d,\"fake\":1}\n",
-            conveyor_data.red_count, conveyor_data.green_count,
-            conveyor_data.blue_count, conveyor_data.other_count,
-            conveyor_data.total_count, conveyor_data.conveyor_speed,
+            "{\"type\":\"init\",\"stm32\":%d,\"speed\":%d,\"status\":%d}\n",
+            conveyor_data.stm32_connected, conveyor_data.conveyor_speed, 
             conveyor_data.system_status);
-    
     xSemaphoreGive(data_mutex);
     
     send(client_sock, init_msg, strlen(init_msg), 0);
     
-    char buffer[256];
+    char buffer[128];
     while (1) {
         int len = recv(client_sock, buffer, sizeof(buffer)-1, 0);
         if (len <= 0) break;
         
         buffer[len] = '\0';
         
-        char *newline = strchr(buffer, '\r');
-        if (newline) *newline = '\0';
-        newline = strchr(buffer, '\n');
-        if (newline) *newline = '\0';
+        // Limpiar
+        char *p = buffer;
+        while (*p) {
+            if (*p == '\r' || *p == '\n') *p = '\0';
+            p++;
+        }
         
-        ESP_LOGI(TAG, "GUI Comando: %s", buffer);
+        // Solo log comandos importantes
+        if (strcmp(buffer, "START") == 0 || strcmp(buffer, "STOP") == 0 || 
+            strncmp(buffer, "SET_SPEED:", 10) == 0) {
+            ESP_LOGI(TAG, "GUI: %s", buffer);
+        }
         
         if (strcmp(buffer, "GET_DATA") == 0) {
-            char json_buffer[512];
+            char json[256];
             xSemaphoreTake(data_mutex, portMAX_DELAY);
-            
-            snprintf(json_buffer, sizeof(json_buffer),
-                    "{\"type\":\"data\",\"red\":%d,\"green\":%d,\"blue\":%d,\"other\":%d,"
-                    "\"total\":%d,\"last_color\":\"%s\",\"speed\":%d,\"status\":%d,\"fake\":%d}\n",
+            snprintf(json, sizeof(json),
+                    "{\"type\":\"data\",\"red\":%d,\"green\":%d,\"blue\":%d,"
+                    "\"total\":%d,\"color\":\"%s\",\"speed\":%d}\n",
                     conveyor_data.red_count, conveyor_data.green_count,
-                    conveyor_data.blue_count, conveyor_data.other_count,
-                    conveyor_data.total_count, conveyor_data.last_color,
-                    conveyor_data.conveyor_speed, conveyor_data.system_status,
-                    conveyor_data.fake_active);
-            
+                    conveyor_data.blue_count, conveyor_data.total_count,
+                    conveyor_data.last_color, conveyor_data.conveyor_speed);
             xSemaphoreGive(data_mutex);
-            
-            send(client_sock, json_buffer, strlen(json_buffer), 0);
+            send(client_sock, json, strlen(json), 0);
         }
         else if (strcmp(buffer, "START") == 0) {
-            process_stm32_data("STATUS:RUNNING");
-            start_fake_data_timer();
-            send(client_sock, "{\"type\":\"start_ack\",\"message\":\"Sistema iniciado\"}\n", 
-                 strlen("{\"type\":\"start_ack\",\"message\":\"Sistema iniciado\"}\n"), 0);
+            send_to_stm32("START");
+            send(client_sock, "{\"type\":\"ok\",\"cmd\":\"start\"}\n", 30, 0);
         }
         else if (strcmp(buffer, "STOP") == 0) {
-            process_stm32_data("STATUS:STOPPED");
-            stop_fake_data_timer();
-            send(client_sock, "{\"type\":\"stop_ack\",\"message\":\"Sistema detenido\"}\n", 
-                 strlen("{\"type\":\"stop_ack\",\"message\":\"Sistema detenido\"}\n"), 0);
+            send_to_stm32("STOP");
+            send(client_sock, "{\"type\":\"ok\",\"cmd\":\"stop\"}\n", 29, 0);
+        }
+        else if (strncmp(buffer, "SET_SPEED:", 10) == 0) {
+            int speed = atoi(buffer + 10);
+            if (speed >= 0 && speed <= 100) {
+                char cmd[32];
+                snprintf(cmd, sizeof(cmd), "SPEED:%d", speed);
+                send_to_stm32(cmd);
+                xSemaphoreTake(data_mutex, portMAX_DELAY);
+                conveyor_data.conveyor_speed = speed;
+                xSemaphoreGive(data_mutex);
+                send(client_sock, "{\"type\":\"ok\",\"cmd\":\"speed\"}\n", 30, 0);
+            }
         }
         else if (strcmp(buffer, "RESET_COUNTERS") == 0) {
+            send_to_stm32("RESET");
             xSemaphoreTake(data_mutex, portMAX_DELAY);
-            conveyor_data.red_count = 0;
-            conveyor_data.green_count = 0;
-            conveyor_data.blue_count = 0;
-            conveyor_data.other_count = 0;
+            conveyor_data.red_count = conveyor_data.green_count = conveyor_data.blue_count = 0;
             conveyor_data.total_count = 0;
             strcpy(conveyor_data.last_color, "NINGUNO");
             xSemaphoreGive(data_mutex);
-            
-            send(client_sock, "{\"type\":\"reset_ack\",\"message\":\"Contadores reseteados\"}\n", 
-                 strlen("{\"type\":\"reset_ack\",\"message\":\"Contadores reseteados\"}\n"), 0);
+            send(client_sock, "{\"type\":\"ok\",\"cmd\":\"reset\"}\n", 30, 0);
         }
         else if (strcmp(buffer, "GET_STATUS") == 0) {
-            char status_msg[256];
+            char status_msg[128];
+            xSemaphoreTake(data_mutex, portMAX_DELAY);
             snprintf(status_msg, sizeof(status_msg),
-                    "{\"type\":\"status\",\"message\":\"OK\",\"fake\":%d,\"speed\":%d}\n",
-                    conveyor_data.fake_active, conveyor_data.conveyor_speed);
+                    "{\"type\":\"status\",\"speed\":%d,\"stm32\":%d}\n",
+                    conveyor_data.conveyor_speed, conveyor_data.stm32_connected);
+            xSemaphoreGive(data_mutex);
             send(client_sock, status_msg, strlen(status_msg), 0);
         }
+        else if (strcmp(buffer, "PING_STM32") == 0) {
+            send_to_stm32("PING");
+            send(client_sock, "{\"type\":\"ping_sent\"}\n", 22, 0);
+        }
         else {
-            send(client_sock, "{\"type\":\"error\",\"message\":\"Comando no valido\"}\n", 
-                 strlen("{\"type\":\"error\",\"message\":\"Comando no valido\"}\n"), 0);
+            send(client_sock, "{\"type\":\"error\",\"msg\":\"cmd invalido\"}\n", 40, 0);
         }
     }
     
     tcp_client_sock = -1;
+    conveyor_data.gui_connected = 0;
     close(client_sock);
-    ESP_LOGI(TAG, "GUI desconectada: %s", client_ip);
+    ESP_LOGI(TAG, "GUI desconectada");
 }
 
+/* =========================================================
+ * TAREA SERVIDOR TCP (SIN LOGS EXCESIVOS)
+ * ========================================================= */
 static void tcp_server_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Esperando WiFi...");
-    xEventGroupWaitBits(wifi_event_group,
-                        WIFI_CONNECTED_BIT,
-                        pdFALSE,
-                        pdTRUE,
-                        portMAX_DELAY);
+    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
 
     int server_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (server_sock < 0) {
-        ESP_LOGE(TAG, "Error creando socket");
+        ESP_LOGE(TAG, "Error socket");
         vTaskDelete(NULL);
         return;
     }
@@ -483,7 +526,7 @@ static void tcp_server_task(void *pvParameters)
     server_addr.sin_port = htons(PORT);
 
     if (bind(server_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        ESP_LOGE(TAG, "Error bind puerto %d", PORT);
+        ESP_LOGE(TAG, "Error bind");
         close(server_sock);
         vTaskDelete(NULL);
         return;
@@ -496,7 +539,7 @@ static void tcp_server_task(void *pvParameters)
         return;
     }
 
-    ESP_LOGI(TAG, "Servidor TCP iniciado puerto %d", PORT);
+    ESP_LOGI(TAG, "Servidor listo puerto %d", PORT);
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -504,8 +547,7 @@ static void tcp_server_task(void *pvParameters)
         int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &client_len);
 
         if (client_sock < 0) {
-            ESP_LOGE(TAG, "Error aceptando conexion");
-            continue;
+            continue;  // Sin log de error
         }
 
         if (tcp_client_sock > 0) {
@@ -521,43 +563,57 @@ static void tcp_server_task(void *pvParameters)
 }
 
 /* =========================================================
- * FUNCION PRINCIPAL
+ * FUNCION PRINCIPAL (CON LOG LEVEL BAJO)
  * ========================================================= */
 void app_main(void)
 {
-    printf("\n\n\n\n\n\n");
-    ESP_LOGI(TAG, "================================================");
-    ESP_LOGI(TAG, "ESP32 FAKE DATA - CINTA TRANSPORTADORA");
-    ESP_LOGI(TAG, "Version: 1.0 - Puerto %d", PORT);
-    ESP_LOGI(TAG, "================================================");
+    // 1. CONFIGURAR NIVEL DE LOGS BAJO
+    esp_log_level_set("*", ESP_LOG_WARN);      // Solo warnings y errores
+    esp_log_level_set("wifi", ESP_LOG_WARN);   // WiFi en modo silencioso
+    esp_log_level_set("ESP32", ESP_LOG_INFO);  // Nuestro tag muestra info
     
+    printf("\n\n");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "Sistema Cinta Transportadora");
+    ESP_LOGI(TAG, "Web: puerto %d", PORT);
+    ESP_LOGI(TAG, "========================================");
+    
+    // Inicializar NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ESP_ERROR_CHECK(nvs_flash_init());
+        nvs_flash_erase();
+        nvs_flash_init();
     }
     
+    // Crear mutex
     data_mutex = xSemaphoreCreateMutex();
     if (data_mutex == NULL) {
-        ESP_LOGE(TAG, "Error creando mutex");
+        ESP_LOGE(TAG, "Error mutex");
         return;
     }
     
+    // Inicializar
     wifi_init_sta();
     uart_init();
     
-    xTaskCreate(uart_read_task, "uart_task", 4096, NULL, 5, NULL);
-    xTaskCreate(tcp_server_task, "tcp_server", 8192, NULL, 5, NULL);
+    // Crear tareas
+    xTaskCreate(uart_read_task, "uart", 4096, NULL, 5, NULL);
+    xTaskCreate(tcp_server_task, "server", 4096, NULL, 4, NULL);
     
-    ESP_LOGI(TAG, "Sistema iniciado. Esperando GUI...");
+    ESP_LOGI(TAG, "Sistema listo");
     
-    int heartbeat = 0;
+    // Loop principal MUY LENTO (cada 60 segundos)
+    int counter = 0;
     while (1) {
-        ESP_LOGI(TAG, "Sistema activo [%d] | GUI: %s | Fake: %s",
-                heartbeat++,
-                (tcp_client_sock > 0) ? "Conectada" : "Esperando",
-                (conveyor_data.fake_active) ? "ACTIVO" : "INACTIVO");
+        vTaskDelay(15000 / portTICK_PERIOD_MS);  // Solo cada 60 segundos
         
-        vTaskDelay(10000 / portTICK_PERIOD_MS);
+        // Mostrar estado resumido
+        xSemaphoreTake(data_mutex, portMAX_DELAY);
+        ESP_LOGI(TAG, "Estado [%d]: STM32=%s, GUI=%s, Cajas=%d", 
+                counter++,
+                conveyor_data.stm32_connected ? "OK" : "NO",
+                conveyor_data.gui_connected ? "OK" : "NO",
+                conveyor_data.total_count);
+        xSemaphoreGive(data_mutex);
     }
 }
