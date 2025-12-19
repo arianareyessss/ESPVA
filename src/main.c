@@ -37,7 +37,7 @@
 
 static const char *TAG = "ESP32_FAKE";
 
-/* =========================================================
+/* =========================3-3================================
  * ESTRUCTURAS DE DATOS
  * ========================================================= */
 typedef struct {
@@ -363,7 +363,7 @@ static void handle_gui_client(int client_sock)
     ESP_LOGI(TAG, "GUI conectada: %s", client_ip);
     tcp_client_sock = client_sock;
     
-    struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
+    struct timeval timeout = {.tv_sec = 50, .tv_usec = 0};
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     

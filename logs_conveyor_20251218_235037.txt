@@ -1,0 +1,59 @@
+[2025-12-18 23:47:53] [Comunicación] Conectando a 192.168.1.100:8080...
+[2025-12-18 23:47:53] [Comunicación] ¡Conectado a ESP32 en 192.168.1.100:8080!
+[2025-12-18 23:47:54] [Comunicación] ESP32: ESP32 Listo
+[2025-12-18 23:47:58] [Comunicación] Comando enviado: START
+[2025-12-18 23:47:58] [Datos] ROJO:0 VERDE:0 AZUL:0 OTRO:0 TOTAL:0
+[2025-12-18 23:47:58] [Sistema] Sistema iniciado
+[2025-12-18 23:47:58] [Errores] Error procesando datos ESP32: 'ConveyorControlGUI' object has no attribute 'conveyor_indicator'
+[2025-12-18 23:48:00] [Detecciones] Color detectado: VERDE
+[2025-12-18 23:48:00] [Datos] ROJO:0 VERDE:1 AZUL:0 OTRO:0 TOTAL:1
+[2025-12-18 23:48:02] [Detecciones] Color detectado: AZUL
+[2025-12-18 23:48:02] [Datos] ROJO:0 VERDE:1 AZUL:1 OTRO:0 TOTAL:2
+[2025-12-18 23:48:03] [Errores] Error al desconectar: 'ConveyorControlGUI' object has no attribute 'conveyor_indicator'
+[2025-12-18 23:48:35] [Comunicación] Conectando a 192.168.1.100:8080...
+[2025-12-18 23:48:35] [Comunicación] ¡Conectado a ESP32 en 192.168.1.100:8080!
+[2025-12-18 23:48:35] [Comunicación] ESP32: ESP32 Listo
+[2025-12-18 23:48:36] [Detecciones] Color detectado: OTRO
+[2025-12-18 23:48:36] [Datos] ROJO:4 VERDE:5 AZUL:5 OTRO:5 TOTAL:19
+[2025-12-18 23:48:38] [Detecciones] Color detectado: ROJO
+[2025-12-18 23:48:38] [Datos] ROJO:5 VERDE:5 AZUL:5 OTRO:5 TOTAL:20
+[2025-12-18 23:48:38] [Detecciones] Color detectado: ROJO
+[2025-12-18 23:48:38] [Datos] ROJO:5 VERDE:5 AZUL:5 OTRO:5 TOTAL:20
+[2025-12-18 23:48:40] [Comunicación] Comando enviado: START
+[2025-12-18 23:48:40] [Detecciones] Color detectado: ROJO
+[2025-12-18 23:48:40] [Datos] ROJO:5 VERDE:5 AZUL:5 OTRO:5 TOTAL:20
+[2025-12-18 23:48:40] [Sistema] Sistema iniciado
+[2025-12-18 23:48:40] [Errores] Error procesando datos ESP32: 'ConveyorControlGUI' object has no attribute 'conveyor_indicator'
+[2025-12-18 23:48:40] [Detecciones] Color detectado: VERDE
+[2025-12-18 23:48:40] [Datos] ROJO:5 VERDE:6 AZUL:5 OTRO:5 TOTAL:21
+[2025-12-18 23:48:42] [Detecciones] Color detectado: AZUL
+[2025-12-18 23:48:42] [Datos] ROJO:5 VERDE:6 AZUL:6 OTRO:5 TOTAL:22
+[2025-12-18 23:48:42] [Detecciones] Color detectado: OTRO
+[2025-12-18 23:48:42] [Datos] ROJO:5 VERDE:6 AZUL:6 OTRO:6 TOTAL:23
+[2025-12-18 23:48:44] [Detecciones] Color detectado: ROJO
+[2025-12-18 23:48:44] [Datos] ROJO:6 VERDE:6 AZUL:6 OTRO:6 TOTAL:24
+[2025-12-18 23:48:45] [Detecciones] Color detectado: VERDE
+[2025-12-18 23:48:45] [Datos] ROJO:6 VERDE:7 AZUL:6 OTRO:6 TOTAL:25
+[2025-12-18 23:48:45] [Detecciones] Color detectado: VERDE
+[2025-12-18 23:48:45] [Datos] ROJO:6 VERDE:7 AZUL:6 OTRO:6 TOTAL:25
+[2025-12-18 23:48:45] [Errores] Error al desconectar: 'ConveyorControlGUI' object has no attribute 'conveyor_indicator'
+[2025-12-18 23:48:51] [Comunicación] Conectando a 192.168.1.100:8080...
+[2025-12-18 23:48:51] [Comunicación] ¡Conectado a ESP32 en 192.168.1.100:8080!
+[2025-12-18 23:48:51] [Comunicación] ESP32: ESP32 Listo
+[2025-12-18 23:48:52] [Detecciones] Color detectado: ROJO
+[2025-12-18 23:48:52] [Datos] ROJO:8 VERDE:8 AZUL:8 OTRO:8 TOTAL:32
+[2025-12-18 23:48:53] [Detecciones] Color detectado: VERDE
+[2025-12-18 23:48:53] [Datos] ROJO:8 VERDE:9 AZUL:8 OTRO:8 TOTAL:33
+[2025-12-18 23:48:54] [Detecciones] Color detectado: AZUL
+[2025-12-18 23:48:54] [Datos] ROJO:8 VERDE:9 AZUL:9 OTRO:8 TOTAL:34
+[2025-12-18 23:48:54] [Detecciones] Color detectado: OTRO
+[2025-12-18 23:48:54] [Datos] ROJO:8 VERDE:9 AZUL:9 OTRO:9 TOTAL:35
+[2025-12-18 23:48:54] [Detecciones] Color detectado: OTRO
+[2025-12-18 23:48:55] [Datos] ROJO:8 VERDE:9 AZUL:9 OTRO:9 TOTAL:35
+[2025-12-18 23:48:56] [Detecciones] Color detectado: ROJO
+[2025-12-18 23:48:56] [Datos] ROJO:9 VERDE:9 AZUL:9 OTRO:9 TOTAL:36
+[2025-12-18 23:48:56] [Detecciones] Color detectado: VERDE
+[2025-12-18 23:48:56] [Datos] ROJO:9 VERDE:10 AZUL:9 OTRO:9 TOTAL:37
+[2025-12-18 23:48:57] [Errores] Error al desconectar: 'ConveyorControlGUI' object has no attribute 'conveyor_indicator'
+[2025-12-18 23:50:24] [Sistema] Contadores reseteados localmente
+
